@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-service
+  namespace: models
+  labels:
+    app: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+  - name: http
+    port: 11434
+    targetPort: 11434
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: models
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+      annotations:
+        # These annotations instruct the Prometheus Kubernetes SD to scrape the sidecar container
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"  # Exporter port
+        prometheus.io/path: "/metrics" # Exporter metrics path
+    spec:
+      containers:
+      - name: ollama
+        image: ollama/ollama:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            ollama serve &
+            OLLAMA_PID=$!
+            echo "Waiting for Ollama server to start..."
+            until curl -f http://localhost:11434/api/tags >/dev/null 2>&1; do
+              sleep 2
+            done
+            echo "Ollama server is ready"
+            if ! ollama list | grep -q "gemma:2b"; then
+              echo "Pulling Gemma model..."
+              ollama pull gemma:2b || echo "Failed to pull Gemma model"
+            else
+              echo "Gemma model already available"
+            fi
+            wait $OLLAMA_PID
+        ports:
+        - containerPort: 11434
+          name: http
+        env:
+        - name: OLLAMA_HOST
+          value: "0.0.0.0:11434"
+        - name: OLLAMA_KEEP_ALIVE
+          value: "5m"
+        volumeMounts:
+        - name: ollama-data
+          mountPath: /root/.ollama
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "4000m"
+        livenessProbe:
+          httpGet:
+            path: /api/version
+            port: 11434
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/version
+            port: 11434
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+      - name: ollama-exporter
+        image: lucabecker42/ollama-exporter:latest
+        ports:
+        - containerPort: 8000
+          name: metrics
+      volumes:
+      - name: ollama-data
+        persistentVolumeClaim:
+          claimName: ollama-pvc
